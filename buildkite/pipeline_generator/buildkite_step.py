@@ -767,6 +767,42 @@ def fnrec_collect_group(groups: "List[BuildkiteGroupStep]") -> "BuildkiteGroupSt
     )
 
 
+PUBLISH_STATE_KEY = "ci-selector-publish-state"
+SELECTOR_GROUP = "CI selector"
+
+
+def publish_state_group() -> "BuildkiteGroupStep":
+    """A main build publishes the selector's RepoState for its own commit, so
+    PR builds based on that commit load the state instead of building it.
+
+    Not the bootstrap: on main it selects against the parent commit, from a
+    premerge queue that cannot write the bucket. Waits on nothing; a failure
+    only costs later PR builds a cache miss.
+    """
+    branch = os.getenv("VLLM_CI_BRANCH") or "main"
+    url = (
+        "https://raw.githubusercontent.com/vllm-project/ci-infra/"
+        f"{branch}/buildkite/ci_selector/publish_state.sh"
+    )
+    step = BuildkiteCommandStep(
+        label=":floppy_disk: Publish selector base state",
+        key=PUBLISH_STATE_KEY,
+        agents={"queue": AgentQueue.SMALL_CPU_POSTMERGE.value},
+        # A path of its own per job, so two jobs on one host cannot overwrite
+        # each other's script, removed after. `$$`: Buildkite interpolates `$`.
+        commands=[
+            'f="$$(mktemp)" && '
+            f'curl -sSfL --retry 3 --max-time 60 -o "$$f" "{url}" && '
+            '{ bash "$$f"; rc=$$?; rm -f "$$f"; exit $$rc; }'
+        ],
+        depends_on=[],
+        soft_fail=True,
+        timeout_in_minutes=30,
+        retry=ensure_infra_failure_retry(None),
+    )
+    return BuildkiteGroupStep(group=SELECTOR_GROUP, steps=[step])
+
+
 def _kernrec_backend(step: "BuildkiteCommandStep") -> str:
     """The backend the kernel recorder prelude exports on this rendered step."""
     text = " ".join(list(step.commands or []) + [str(v) for v in (step.env or {}).values()])

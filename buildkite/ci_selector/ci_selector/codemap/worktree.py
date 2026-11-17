@@ -22,6 +22,7 @@ from typing import TypeVar
 
 from .graph.build import FullGraph, build_full_graph
 from .state import RepoState
+from .state_cache import load_or_build
 
 T = TypeVar("T")
 
@@ -310,7 +311,10 @@ def _cached_by_tree(
 
 
 def state_for(repo: Path, base: str) -> RepoState:
-    return _cached_by_tree(_STATE_CACHE, MAX_CACHED_STATES, repo, base, RepoState.build)
+    """The state at `base`, bound to a worktree at it either way: selection
+    reads base files from `state.repo`. In CI it is loaded from the state
+    main published for that tree when there is one (see state_cache)."""
+    return _cached_by_tree(_STATE_CACHE, MAX_CACHED_STATES, repo, base, load_or_build)
 
 
 def full_graph_for(repo: Path, ref: str) -> FullGraph:

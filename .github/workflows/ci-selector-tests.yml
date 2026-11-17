@@ -79,3 +79,9 @@ jobs:
         run: |
           KERNREC_PYTHON="$(uv run python -c 'import sys; print(sys.executable)')" bash recorders/kernrec/test_collect.sh
           bash recorders/fnrec/test_collect.sh
+
+      # The main-build step that publishes the selector's base state, with aws
+      # and uv stubbed: which failures skip publishing and which fail the step.
+      - name: Base-state publish rules
+        working-directory: buildkite/ci_selector
+        run: bash test_publish_state.sh

@@ -13,6 +13,7 @@ ci-build-table = "ci_selector.scripts.build:main"
 ci-publish-function-record = "ci_selector.scripts.publish:main"
 ci-fetch-function-record = "ci_selector.scripts.fetch_functions:main"
 ci-fetch-kernel-record = "ci_selector.scripts.fetch_kernels:main"
+ci-publish-state = "ci_selector.scripts.publish_state:main"
 
 [dependency-groups]
 dev = ["pytest>=8.0"]

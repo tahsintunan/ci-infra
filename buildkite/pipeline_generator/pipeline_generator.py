@@ -22,6 +22,7 @@ from buildkite_step import (
     convert_group_step_to_buildkite_step,
     fnrec_collect_group,
     one_job_annotation,
+    publish_state_group,
     kernrec_collect_group,
     kernrec_amd_enabled,
     kernrec_enabled,
@@ -220,6 +221,17 @@ class PipelineGenerator:
             buildkite_group_steps.append(
                 BuildkiteGroupStep(group=COLLECT_GROUP, steps=collect)
             )
+        # PR builds are based on main commits, so each main build publishes
+        # the selector's state for its own. The state depends on the tree, not
+        # the pipeline, so vllm_ci alone publishes. A nightly's commit has
+        # already been published by its regular build.
+        if (
+            global_config["name"] == "vllm_ci"
+            and global_config["branch"] == "main"
+            and global_config["pull_request"] in (None, "", "false")
+            and global_config["nightly"] != "1"
+        ):
+            buildkite_group_steps.append(publish_state_group())
 
         # Run pre-commit as a dedicated step in parallel with the image build.
         # Steps that depend on the image build also wait for pre-commit to pass.

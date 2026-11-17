@@ -437,3 +437,64 @@ def test_steps_whose_definition_changed_run_even_when_optional(pr_config, monkey
     assert record["selector_changed_steps"] == ["nightly-changed"]
     assert record["selector_keys"] == ["nightly-changed", "test-b"]
     assert record["selector_optional_dropped"] == ["nightly-other"]
+
+
+def test_the_state_cache_line_is_picked_out_of_the_selector_log():
+    log = (
+        "loading table\n"
+        "ci-selector repostate cache: hit abc-123-v1.json.gz loaded in 0.3s\n"
+        "selected 12 steps\n"
+    )
+    assert selector_gate.state_cache_lines(log) == [
+        "ci-selector repostate cache: hit abc-123-v1.json.gz loaded in 0.3s"
+    ]
+    assert selector_gate.state_cache_lines("nothing\n") == []
+
+
+def test_the_state_cache_line_is_found_in_bytes_or_nothing():
+    """A timed-out run hands stderr over as bytes, or None."""
+    line = b"ci-selector repostate cache: miss k (TimeoutError); built in 61.0s"
+    assert selector_gate.state_cache_lines(b"x\n" + line + b"\n") == [line.decode()]
+    assert selector_gate.state_cache_lines(None) == []
+
+
+CACHE_LINE = "ci-selector repostate cache: hit k loaded in 0.3s"
+
+
+@pytest.fixture
+def ci_select(monkeypatch, tmp_path):
+    """run_ci_select with the clone, uv and fetch stubbed; the test decides
+    what the ci-select subprocess does."""
+    monkeypatch.setattr(selector_gate, "_run", lambda *a, **kw: "abc\n")
+    monkeypatch.setattr(selector_gate, "_uv", lambda workdir: "uv")
+    monkeypatch.setattr(selector_gate.tempfile, "mkdtemp", lambda prefix: str(tmp_path))
+
+    def install(fake):
+        monkeypatch.setattr(selector_gate.subprocess, "run", fake)
+        return lambda **kw: selector_gate.run_ci_select(
+            repo="r", base="b", head="h", pipeline="p"
+        )
+
+    return install
+
+
+def test_a_timed_out_selector_run_keeps_its_cache_line(ci_select, capsys):
+    def timed_out(cmd, **kw):
+        raise subprocess.TimeoutExpired(
+            cmd, 1200, stderr=("loading\n" + CACHE_LINE + "\n").encode()
+        )
+
+    record = selector_gate.decide(PR, ["x"], ci_select(timed_out))
+    assert record["fallback"].startswith("selector failed: TimeoutExpired")
+    assert record["state_cache"] == [CACHE_LINE]
+    assert CACHE_LINE in capsys.readouterr().out
+
+
+def test_a_failed_selector_run_keeps_its_cache_line(ci_select, capsys):
+    def failed(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 1, "", CACHE_LINE + "\nTraceback\n")
+
+    record = selector_gate.decide(PR, ["x"], ci_select(failed))
+    assert record["fallback"].startswith("selector failed: RuntimeError")
+    assert record["state_cache"] == [CACHE_LINE]
+    assert CACHE_LINE in capsys.readouterr().out

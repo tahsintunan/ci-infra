@@ -36,7 +36,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
-from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional
+from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Union
 
 SELECTOR_ENV_VAR = "VLLM_CI_SELECTOR"
 DECISION_FILE = "ci_selector_decision.json"
@@ -48,6 +48,9 @@ RECORD_URL = (
 # The whole selector run, fetches included. Past it the build keeps today's
 # rules rather than wait.
 SELECTOR_TIMEOUT_SECONDS = 20 * 60
+# Starts ci-select's base-state cache hit/miss line. Must equal LOG_PREFIX in
+# ci_selector's state_cache.py.
+STATE_CACHE_LOG_PREFIX = "ci-selector repostate cache:"
 
 
 def mode() -> str:
@@ -158,12 +161,14 @@ def decide(
         )
     except Exception as error:  # noqa: BLE001 - any failure keeps today's rules
         record["fallback"] = f"selector failed: {type(error).__name__}: {error}"[:2000]
+        record["state_cache"] = getattr(error, "state_cache", None)
         return record
     finally:
         record["seconds"] = round(time.time() - started, 1)
     record["selector"] = result.get("emission")
     record["records"] = result.get("records")
     record["selector_log"] = result.get("log")
+    record["state_cache"] = result.get("state_cache")
     # Per step: the map's reasons and what each record did. What a miss is
     # diagnosed from later, without re-running the selector.
     record["explain"] = result.get("explain")
@@ -308,31 +313,40 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
     # and parses it once (about 1 GB of JSON), instead of a separate fetch
     # step that parsed it a first time only to check it.
     _run(run + ["ci-fetch-kernel-record", "--out", data], timeout=left())
-    out = subprocess.run(
-        run
-        + [
-            "ci-select",
-            "--repo",
-            repo,
-            "--diff",
-            f"{base}...{head}",
-            "--emit-keys",
-            "--pipeline",
-            pipeline,
-            "--kernel-table",
-            os.path.join(data, "kernel_table.json.gz"),
-            "--kernel-symbol-map",
-            os.path.join(data, "kernel_symbol_map.json.gz"),
-            "--explain",
-            explain_path,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=left(),
-        check=False,
-    )
+    try:
+        out = subprocess.run(
+            run
+            + [
+                "ci-select",
+                "--repo",
+                repo,
+                "--diff",
+                f"{base}...{head}",
+                "--emit-keys",
+                "--pipeline",
+                pipeline,
+                "--kernel-table",
+                os.path.join(data, "kernel_table.json.gz"),
+                "--kernel-symbol-map",
+                os.path.join(data, "kernel_symbol_map.json.gz"),
+                "--explain",
+                explain_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=left(),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        error.state_cache = report_state_cache(error.stderr)
+        raise
+    state_cache = report_state_cache(out.stderr)
     if out.returncode != 0:
-        raise RuntimeError(f"ci-select exited {out.returncode}: {out.stderr[-1500:]}")
+        failed = RuntimeError(
+            f"ci-select exited {out.returncode}: {out.stderr[-1500:]}"
+        )
+        failed.state_cache = state_cache
+        raise failed
     explain = None
     try:
         with open(explain_path) as f:
@@ -344,8 +358,30 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
         "explain": explain,
         "records": {"fnrec": _latest("fnrec"), "kernrec": _latest("kernrec")},
         "log": out.stderr[-4000:],
+        "state_cache": state_cache,
         "ci_infra_commit": ci_infra_commit,
     }
+
+
+def state_cache_lines(log: Union[str, bytes, None]) -> List[str]:
+    """ci-select's base-state cache line, out of its whole stderr. A timeout
+    hands stderr over as bytes, or None."""
+    if isinstance(log, bytes):
+        log = log.decode("utf-8", "replace")
+    return [
+        line
+        for line in (log or "").splitlines()
+        if line.startswith(STATE_CACHE_LOG_PREFIX)
+    ]
+
+
+def report_state_cache(log: Union[str, bytes, None]) -> List[str]:
+    """Print the cache line to the bootstrap log, whole: it comes early, and
+    the recorded log is only stderr's last 4000 characters."""
+    lines = state_cache_lines(log)
+    for line in lines:
+        print(line)
+    return lines
 
 
 def known_keys(steps: Iterable[Any]) -> FrozenSet[str]:
